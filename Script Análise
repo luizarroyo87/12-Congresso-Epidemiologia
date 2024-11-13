@@ -1,0 +1,972 @@
+############################################################################
+
+#Livrarias
+library(tidyverse)
+library(data.table)
+library(ggplot2)
+library(readxl)
+library(openxlsx)
+library(hrbrthemes)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(summarytools)
+library(sf)
+library(brazilmaps)
+library(BAMMtools)
+library(ggmap)
+library(sf)
+library(ggsn)
+library(ggpubr)
+library(prais)
+
+############################################################################
+
+#Bancos de dados
+load("Arquivos_analises_26_10_23.Rdata")
+
+############################################################################
+
+#Modelo Brasil
+
+casos_BR_total <- dados_TB %>% 
+  filter(TRATAMENTO %in% c("Caso Novo", "Não Sabe","Pós-óbito")) %>%   
+  filter(SG_UF_novo!=is.na(SG_UF_novo)) %>% 
+  summarise(Casos=n()) %>% 
+  ungroup()
+
+
+casos_BR <- dados_TB %>% 
+  filter(TRATAMENTO %in% c("Caso Novo", "Não Sabe","Pós-óbito")) %>%   
+  filter(SG_UF_novo!=is.na(SG_UF_novo)) %>% 
+  group_by(ano) %>% 
+  summarise(Casos=n()) %>% 
+  ungroup()
+
+casos_BR <- casos_BR %>% 
+  mutate(Degrau=case_when(ano<=2019 ~ 0,
+                          ano>=2020 ~ 1))
+
+casos_BR <- casos_BR %>% 
+  mutate(Rampa=case_when(ano<=2019 ~ 0,
+                         ano==2020 ~ 1,
+                         ano==2021 ~ 2,
+                         ano==2022 ~ 3))
+
+casos_BR_2019 <- casos_BR %>% 
+  filter(ano<=2019)
+
+modelo_BR_2019 <- prais_winsten(log(Casos) ~ ano, data = casos_BR_2019, index = "ano")
+summary(modelo_BR_2019)
+
+library(lmtest)
+dwtest(modelo_BR_2019)
+
+100 * (-1 + 10^0.002094)
+
+0.002094 - (1.96 * 0.003615)
+0.002094 + (1.96 * 0.003615)
+
+100 * (-1 + 10^-0.0049914)
+100 * (-1 + 10^0.0091794)
+
+#Resultado tendência Brasil
+#APC= 0.48 (IC95%: -1.14:2.13)
+
+
+modelo_BR <- prais_winsten(log(Casos) ~ ano + Degrau + Rampa, data = casos_BR, index = "ano")
+summary(modelo_BR)
+
+#################################################################################
+
+#Teste modelo UF
+
+#Contabilizar número de casos novos por UF
+
+casos_UF <- dados_TB %>% 
+  filter(TRATAMENTO %in% c("Caso Novo", "Não Sabe","Pós-óbito")) %>%   
+  filter(SG_UF_novo!=is.na(SG_UF_novo)) %>% 
+  group_by(SG_UF_novo, ano) %>% 
+  summarise(Casos=n()) %>% 
+  ungroup()
+
+
+casos_UF <- casos_UF %>% 
+  mutate(Degrau=case_when(ano<=2019 ~ 0,
+                          ano>=2020 ~ 1))
+
+casos_UF <- casos_UF %>% 
+  mutate(Rampa=case_when(ano<=2019 ~ 0,
+                         ano==2020 ~ 1,
+                         ano==2021 ~ 2,
+                         ano==2022 ~ 3))
+
+
+casos_UF <- casos_UF %>% 
+  mutate(Degrau_r=case_when(ano<=2020 ~ 0,
+                            ano>=2021 ~ 1))
+
+casos_UF <- casos_UF %>% 
+  mutate(Rampa_r=case_when(ano<=2020 ~ 0,
+                             ano==2021 ~ 1,
+                             ano==2022 ~ 2))
+
+
+# Criar uma lista de DataFrames divididos por UF
+lista_dataframes_atualizada <- split(casos_UF, casos_UF$SG_UF_novo)
+
+############################################################################
+#Analisar apenas tendência até 2019
+
+casos_UF_2019 <- casos_UF %>% 
+  filter(ano<=2019)
+
+# Criar uma lista de DataFrames divididos por UF
+lista_dataframes_atualizada_2019 <- split(casos_UF_2019, casos_UF_2019$SG_UF_novo)
+
+
+# Função para aplicar prais_winsten a um dataframe
+apply_prais_winsten <- function(df) {
+  prais_winsten(log(Casos) ~ ano, data = df, index = "ano")
+}
+
+# Aplicar a função a cada dataframe na lista
+resultados_prais_winsten <- lapply(lista_dataframes_atualizada_2019, apply_prais_winsten)
+
+
+# Exibir o summary para cada resultado
+for (i in seq_along(resultados_prais_winsten)) {
+  cat("Resumo para a UF", names(lista_dataframes_atualizada_2019)[i], ":\n")
+  print(summary(resultados_prais_winsten[[i]]))
+  cat("\n")
+}
+
+
+
+# Criar um DataFrame vazio para armazenar os resultados
+df_resultados <- data.frame()
+
+# Iterar sobre os resultados e extrair as informações desejadas
+for (i in seq_along(resultados_prais_winsten)) {
+  # Extrair informações
+  UF <- names(lista_dataframes_atualizada_2019)[i]
+  
+  estimate_Ano <- coef(resultados_prais_winsten[[i]])["ano"]
+  
+  std_error_Ano <- summary(resultados_prais_winsten[[i]])$coefficients["ano", "Std. Error"]
+  p_value_Ano <- summary(resultados_prais_winsten[[i]])$coefficients["ano", "Pr(>|t|)"]
+  durbin <- dwtest(resultados_prais_winsten[[i]])
+
+  # Criar um DataFrame temporário com as informações
+  df_temp <- data.frame(
+    UF = UF,
+    Estimate_Ano = estimate_Ano,
+    Std_Error_Ano = std_error_Ano,
+    P_Value_Ano = p_value_Ano,
+    Durbin = durbin$statistic,
+    Durbin_p = durbin$p.value
+    )
+  
+  # Adicionar o DataFrame temporário ao DataFrame principal
+  df_resultados <- rbind(df_resultados, df_temp)
+}
+
+# Exibir o DataFrame final
+print(df_resultados)
+
+
+write.xlsx(df_resultados, file = "Resultados_UF_tendencia_2019.xlsx")
+
+
+############################################################################
+
+#Análise temporal (com mudança de nível e inclinação da série temporal 2001 a 2022)
+
+# Função para aplicar prais_winsten a um dataframe
+apply_prais_winsten <- function(df) {
+  prais_winsten(log(Casos) ~ ano + Degrau + Rampa, data = df, index = "ano")
+}
+
+# Aplicar a função a cada dataframe na lista
+resultados_prais_winsten <- lapply(lista_dataframes_atualizada, apply_prais_winsten)
+
+# Exibir o summary para cada resultado
+for (i in seq_along(resultados_prais_winsten)) {
+  cat("Resumo para o município", names(lista_dataframes_atualizada)[i], ":\n")
+  print(summary(resultados_prais_winsten[[i]]))
+  cat("\n")
+}
+
+
+
+# Criar um DataFrame vazio para armazenar os resultados
+df_resultados <- data.frame()
+
+# Iterar sobre os resultados e extrair as informações desejadas
+for (i in seq_along(resultados_prais_winsten)) {
+  # Extrair informações
+  UF <- names(lista_dataframes_atualizada)[i]
+  
+  estimate_Ano <- coef(resultados_prais_winsten[[i]])["ano"]
+  estimate_Degrau <- coef(resultados_prais_winsten[[i]])["Degrau"]
+  estimate_Rampa <- coef(resultados_prais_winsten[[i]])["Rampa"]
+  
+  std_error_Ano <- summary(resultados_prais_winsten[[i]])$coefficients["ano", "Std. Error"]
+  p_value_Ano <- summary(resultados_prais_winsten[[i]])$coefficients["ano", "Pr(>|t|)"]
+  
+  std_error_Degrau <- summary(resultados_prais_winsten[[i]])$coefficients["Degrau", "Std. Error"]
+  p_value_Degrau <- summary(resultados_prais_winsten[[i]])$coefficients["Degrau", "Pr(>|t|)"]
+  
+  std_error_Rampa <- summary(resultados_prais_winsten[[i]])$coefficients["Rampa", "Std. Error"]
+  p_value_Rampa <- summary(resultados_prais_winsten[[i]])$coefficients["Rampa", "Pr(>|t|)"]
+  
+  # Criar um DataFrame temporário com as informações
+  df_temp <- data.frame(
+    UF = UF,
+    Estimate_Ano = estimate_Ano,
+    Estimate_Degrau = estimate_Degrau,
+    Estimate_Rampa = estimate_Rampa,
+    Std_Error_Ano = std_error_Ano,
+    P_Value_Ano = p_value_Ano,
+    Std_Error_Degrau = std_error_Degrau,
+    P_Value_Degrau = p_value_Degrau,
+    Std_Error_Rampa = std_error_Rampa,
+    P_Value_Rampa = p_value_Rampa
+  )
+  
+  # Adicionar o DataFrame temporário ao DataFrame principal
+  df_resultados <- rbind(df_resultados, df_temp)
+}
+
+# Exibir o DataFrame final
+print(df_resultados)
+
+summary(resultados_prais_winsten$AC)
+
+#######################################################
+
+write.xlsx(df_resultados, file = "Resultados_UF_detalhes.xlsx")
+
+#######################################################
+
+# Figura flow
+
+Tendencia <- c("Crescimento", "Estacionário", "Decréscimo")
+Nivel <- c("Crescimento", "Estacionário", "Decréscimo")
+Inclinacao <- c("Crescimento", "Estacionário", "Decréscimo")
+Recuperacao <- c("<2019", ">2019")
+
+# Criar um data frame com todas as combinações possíveis
+combinacoes <- expand.grid(Tendencia = Tendencia,
+                           Nivel = Nivel,
+                           Inclinacao = Inclinacao,
+                           Recuperacao = Recuperacao)
+
+flow <- read.xlsx("C:/Users/luiz.arroyo/OneDrive - Ministério da Saúde/DCCI/ARTIGOS/Serie temporal TB/Resultados_UF.xlsx", sheet = "Sheet 1")
+
+flow_freq <- flow %>% 
+  group_by(Classificação.tendência, Classificação.degrau, Classificação.rampa , Recuperação_class) %>% 
+  summarise(n=n()) %>% 
+  ungroup()
+
+combinacoes <- combinacoes %>% 
+  left_join(flow_freq, by=c("Tendencia" = "Classificação.tendência",
+                            "Nivel" = "Classificação.degrau",
+                            "Inclinacao"  = "Classificação.rampa",
+                            "Recuperacao" = "Recuperação_class"))
+
+combinacoes$n[is.na(combinacoes$n)] <- 0
+
+library(alluvial)
+library(ggalluvial)
+
+is_alluvia_form(as.data.frame(combinacoes), axes = 1:3, silent = TRUE)
+
+gg_flow <- ggplot(as.data.frame(combinacoes),
+                  aes(y = n, axis1 = Tendencia, axis2 = Nivel, axis3 = Inclinacao)) +
+  geom_alluvium(aes(fill = Recuperacao), width = 1/20) +
+  geom_stratum(width = 1/20, fill = "grey", color = "white") +
+  geom_label(stat = "stratum", aes(label = after_stat(stratum)), size=30) +
+  scale_x_discrete(limits = c("Tendência", "Nível", "Inclinação"), expand = c(.05, .05)) +
+  scale_fill_manual(values = c("<2019" = "#44114c", ">2019" = "#bae77a"))+
+  #scale_fill_brewer(type = "qual", palette = "Set1") +
+  scale_y_continuous(limits = c(0,27), breaks = seq(0, 27, 3), expand = c(0,0)) + 
+  labs(x = "", y = "Frequência") +
+  guides(fill=guide_legend(title=NULL))+
+  theme_ipsum(grid = F, ticks = F, base_size = 20, axis_text_size = 20) +
+  theme(axis.line.x = element_line(colour = "grey"),
+        axis.text.x = element_text(colour = "black", size = 20),
+        axis.text.y = element_text(colour = "black", size = 20),
+        axis.title.x = element_text(colour = "black", size = 20, face = "bold"),
+        axis.title.y.left = element_text(colour = "black", size = 20, face = "bold"),
+        axis.title.y.right = element_text(colour = "black", size = 20, face = "bold"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.text = element_text(size = 20),
+        legend.position="bottom")
+
+ggsave(gg_flow, width = 800, height = 200, units = "mm", file = "C:/Users/luiz.arroyo/OneDrive - Ministério da Saúde/DCCI/ARTIGOS/Serie temporal TB/Figura_flow.png", dpi = "retina")
+
+
+#Figura série temporal
+casos_UF_serie <- dados_TB %>% 
+  filter(TRATAMENTO %in% c("Caso Novo", "Não Sabe","Pós-óbito")) %>%   
+  filter(SG_UF_novo!=is.na(SG_UF_novo)) %>% 
+  group_by(SG_UF_novo, ano) %>% 
+  summarise(Casos=n()) %>% 
+  ungroup()
+
+casos_UF_serie <- casos_UF_serie %>% 
+  mutate(data=case_when(ano=="2001" ~ "2001-01-01",
+                        ano=="2002" ~ "2002-01-01",
+                        ano=="2003" ~ "2003-01-01",
+                        ano=="2004" ~ "2004-01-01",
+                        ano=="2005" ~ "2005-01-01",
+                        ano=="2006" ~ "2006-01-01",
+                        ano=="2007" ~ "2007-01-01",
+                        ano=="2008" ~ "2008-01-01",
+                        ano=="2009" ~ "2009-01-01",
+                        ano=="2010" ~ "2010-01-01",
+                        ano=="2011" ~ "2011-01-01",
+                        ano=="2020" ~ "2020-01-01",
+                        ano=="2013" ~ "2013-01-01",
+                        ano=="2014" ~ "2014-01-01",
+                        ano=="2015" ~ "2015-01-01",
+                        ano=="2016" ~ "2016-01-01",
+                        ano=="2017" ~ "2017-01-01",
+                        ano=="2018" ~ "2018-01-01",
+                        ano=="2019" ~ "2019-01-01",
+                        ano=="2020" ~ "2020-01-01",
+                        ano=="2021" ~ "2021-01-01",
+                        ano=="2022" ~ "2022-01-01"))
+
+casos_UF_serie$data <- as.Date(casos_UF_serie$data, format= "%Y-%m-%d")
+
+gg_casos_UF_serie <- ggplot(casos_UF_serie, aes(x = data, y = Casos, color=SG_UF_novo)) +
+  geom_line(aes(x = data, y = Casos), show.legend = F)+
+  scale_x_date(labels = casos_UF_serie$ano, breaks = casos_UF_serie$data, expand = c(.05, 0),  guide = guide_axis(check.overlap = TRUE, angle = 45)) + 
+  labs(x = "Ano", y = "Casos novos") +
+  labs(x = "", y = "Frequência") +
+  geom_vline(xintercept=as.numeric(casos_UF_serie$data[c(151:154)]),
+             linetype=4, colour="black")+
+  guides(fill=guide_legend(title=NULL))+
+  theme_ipsum(grid = F, ticks = F, base_size = 20, axis_text_size = 20) +
+  theme(axis.line.x = element_line(colour = "grey"),
+        axis.text.x = element_text(colour = "black", size = 20),
+        axis.text.y = element_text(colour = "black", size = 20),
+        axis.title.x = element_text(colour = "black", size = 20, face = "bold"),
+        axis.title.y.left = element_text(colour = "black", size = 20, face = "bold"),
+        axis.title.y.right = element_text(colour = "black", size = 20, face = "bold"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.text = element_text(size = 20),
+        legend.position="bottom")
+  
+ggsave(gg_casos_UF_serie, width = 800, height = 400, units = "mm", file = "C:/Users/luiz.arroyo/OneDrive - Ministério da Saúde/DCCI/ARTIGOS/Serie temporal TB/Figura_serie_UF.png", dpi = "retina")
+
+#################################################################################
+
+#Modelo ARIMA para calcular o número de casos que deveriam ser notificados em 4040 a 4022
+library(ts)
+library(sna)
+library(forecast)
+
+
+casos_UF_2019_teste <- casos_UF_2019 %>% 
+  filter(SG_UF_novo=="RJ")
+
+casos_UF_2019_teste_ts <- ts(casos_UF_2019_teste$Casos, start = 2001, end = 2019, frequency = 1)
+
+arima <- auto.arima(casos_UF_2019_teste_ts, stepwise = FALSE)
+
+arima$
+
+tsdiag(arima) 
+Box_test <- Box.test(arima$residuals,lag=1)
+
+previsao <- forecast(arima, h = 2)
+
+autoplot(previsao, predict.colour = "red") 
+
+plot(previsao$residuals)
+
+
+# Defina a função
+previsao_ARIMA <- function(df) {
+  # Extrai SG_UF_novo do DataFrame
+  uf <- unique(df$SG_UF_novo)
+  
+  # Inicializa um DataFrame para armazenar os resultados
+  resultados_df <- data.frame()
+  
+  # Loop sobre cada SG_UF_novo
+  for (i in seq_along(uf)) {
+    # Filtra o DataFrame para a SG_UF_novo atual
+    casos_UF_2019_teste <- df[df$SG_UF_novo == uf[i], ]
+    
+    # Cria a série temporal
+    casos_UF_2019_teste_ts <- ts(casos_UF_2019_teste$Casos, start = 2001, end = 2019, frequency = 1)
+    
+    # Ajusta o modelo ARIMA
+    arima_model <- auto.arima(casos_UF_2019_teste_ts, stepwise = FALSE)
+    
+    # Análise da estatística de Box–Pierce (e Ljung–Box) 
+    Box_test <- Box.test(arima_model$residuals)
+    
+    # Faz a previsão
+    previsao <- forecast(arima_model, h = 3)
+    
+    # Adiciona os resultados ao DataFrame
+    resultado_atual <- data.frame(
+      SG_UF_novo = uf[i],
+      Data = format(date_decimal(as.numeric(row.names(as.data.frame(previsao)))),"%Y"),
+      Box_test = as.numeric(Box_test$p.value),
+      Box_test_statistic = as.numeric(Box_test$statistic),
+      Previsao = as.numeric(previsao$mean),
+      Lower = as.numeric(previsao$lower),
+      Upper = as.numeric(previsao$upper)
+    )
+    
+    resultados_df <- bind_rows(resultados_df, resultado_atual)
+  }
+  
+  return(resultados_df)
+}
+
+# Aplica a função à lista de DataFrames
+resultados_finais <- lapply(lista_dataframes_atualizada_2019, previsao_ARIMA) %>% bind_rows()
+
+write.xlsx(resultados_finais, file = "ARIMA.xlsx")
+
+#Gerar arquivo com o modelo ARIMA adjustado
+
+# Defina a função
+previsao_ARIMA <- function(df) {
+  # Extrai SG_UF_novo do DataFrame
+  uf <- unique(df$SG_UF_novo)
+  
+  # Inicializa um DataFrame para armazenar os resultados
+  resultados_df <- data.frame()
+  
+  # Inicializa uma lista para armazenar os modelos ARIMA
+  modelos_arima <- list()
+  
+  # Loop sobre cada SG_UF_novo
+  for (i in seq_along(uf)) {
+    # Filtra o DataFrame para a SG_UF_novo atual
+    casos_UF_2019_teste <- df[df$SG_UF_novo == uf[i], ]
+    
+    # Cria a série temporal
+    casos_UF_2019_teste_ts <- ts(casos_UF_2019_teste$Casos, start = 2001, end = 2019, frequency = 1)
+    
+    # Ajusta o modelo ARIMA
+    arima_model <- auto.arima(casos_UF_2019_teste_ts, stepwise = FALSE)
+    
+    # Salva o modelo ARIMA na lista
+    modelos_arima[[i]] <- arima_model
+    
+    # Análise da estatística de Box–Pierce (e Ljung–Box) 
+    Box_test <- Box.test(arima_model$residuals)
+    
+    # Faz a previsão
+    previsao <- forecast(arima_model, h = 3)
+    
+    # Adiciona os resultados ao DataFrame
+    resultado_atual <- data.frame(
+      SG_UF_novo = uf[i],
+      Data = format(date_decimal(as.numeric(row.names(as.data.frame(previsao)))),"%Y"),
+      Box_test = as.numeric(Box_test$p.value),
+      Previsao = as.numeric(previsao$mean),
+      Lower = as.numeric(previsao$lower),
+      Upper = as.numeric(previsao$upper)
+    )
+    
+    resultados_df <- bind_rows(resultados_df, resultado_atual)
+  }
+  
+  # Adiciona a lista de modelos ARIMA ao resultado final
+  resultados_df$modelos_arima <- modelos_arima
+  
+  return(resultados_df)
+}
+
+
+# Aplica a função à lista de DataFrames
+resultados_finais <- lapply(lista_dataframes_atualizada_2019, previsao_ARIMA) %>% bind_rows()
+
+# Adiciona a lista de modelos ARIMA ao resultado final
+resultados_df$modelos_arima <- modelos_arima
+
+#################################################################################
+
+#ARIMA PLOT
+
+dados_arima_tab <- read.xlsx("C:/Users/luiz.arroyo/OneDrive - Ministério da Saúde/DCCI/ARTIGOS/Serie temporal TB/Resultados_UF_2.xlsx", sheet = "ARIMA_PLOT_R_por_ano_tab")
+
+dados_arima_tab$Ano <- as.character(dados_arima_tab$Ano)
+
+gg_dados_arima_tab <- ggplot(data=dados_arima_tab, aes(x=reorder(SG_UF_novo, desc(Casos)), y=Casos, fill=Ano)) +
+  geom_bar(data=filter(dados_arima_tab, Tipo=="notificado"), aes(x=reorder(SG_UF_novo, desc(Casos)), y=Casos, fill=Ano), 
+           stat="identity", color="black", position=position_dodge())+
+  scale_y_continuous(limits = c(0,21000), breaks = seq(0, 20000, 5000), expand = c(0,0), 
+                     labels = scales::label_comma(big.mark = ".", decimal.mark = ","))+
+  #SP - 2020
+  geom_segment(aes(x = 0.6, y = 17170.84683, xend = 0.8, yend = 17170.84683), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 0.6, y = 18957.15317, xend = 0.8, yend = 18957.15317), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 0.7, y = 17170.84683, xend = 0.7, yend = 18957.15317), colour = "black", linewidth=1)+
+  geom_point(aes(x = 0.7, y = 18064), colour = "black", show.legend = F, size=3)+
+  #SP - 2021
+  geom_segment(aes(x = 0.9, y = 16800.89067, xend = 1.1, yend = 16800.89067), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 0.9, y = 19327.10933, xend = 1.1, yend = 19327.10933), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 1, y = 16800.89067, xend = 1, yend = 19327.10933), colour = "black", linewidth=1)+
+  geom_point(aes(x = 1, y = 18064), colour = "black", show.legend = F, size=3)+
+  #SP - 2022
+  geom_segment(aes(x = 1.2, y = 16517.01333, xend = 1.4, yend = 16517.01333), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 1.2, y = 19610.98667, xend = 1.4, yend = 19610.98667), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 1.3, y = 16517.01333, xend = 1.3, yend = 19610.98667), colour = "black", linewidth=1)+
+  geom_point(aes(x = 1.3, y = 18064), colour = "black", show.legend = F, size=3)+
+  
+  #RJ - 2020
+  geom_segment(aes(x = 1.6, y = 11679.17097, xend = 1.8, yend = 11679.17097), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 1.6, y = 12915.26384, xend = 1.8, yend = 12915.26384), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 1.7, y = 11679.17097, xend = 1.7, yend = 12915.26384), colour = "black", linewidth=1)+
+  geom_point(aes(x = 1.7, y = 12297.2174), colour = "black", show.legend = F, size=3)+
+  #RJ - 2021
+  geom_segment(aes(x = 1.9, y = 11103.98109, xend = 2.1, yend = 11103.98109), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 1.9, y = 13803.60533, xend = 2.1, yend = 13803.60533), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 2, y = 11103.98109, xend = 2, yend = 13803.60533), colour = "black", linewidth=1)+
+  geom_point(aes(x = 2, y = 12453.79321), colour = "black", show.legend = F, size=3)+
+  #RJ - 2022
+  geom_segment(aes(x = 2.2, y = 10649.70959, xend = 2.4, yend = 10649.70959), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 2.2, y = 14571.02844, xend = 2.4, yend = 14571.02844), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 2.3, y = 10649.70959, xend = 2.3, yend = 14571.02844), colour = "black", linewidth=1)+
+  geom_point(aes(x = 2.3, y = 12610.36902), colour = "black", show.legend = F, size=3)+
+  
+  #PE - 2020
+  geom_segment(aes(x = 2.6, y = 4514.152739, xend = 2.8, yend = 4514.152739), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 2.6, y = 5245.847261, xend = 2.8, yend = 5245.847261), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 2.7, y = 4514.152739, xend = 2.7, yend = 5245.847261), colour = "black", linewidth=1)+
+  geom_point(aes(x = 2.7, y = 4880), colour = "black", show.legend = F, size=3)+
+  #PE - 2021
+  geom_segment(aes(x = 2.9, y = 4362.613842, xend = 3.1, yend = 4362.613842), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 2.9, y = 5397.386158, xend = 3.1, yend = 5397.386158), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 3, y = 4362.613842, xend = 3, yend = 5397.386158), colour = "black", linewidth=1)+
+  geom_point(aes(x = 3, y = 4880), colour = "black", show.legend = F, size=3)+
+  #PE - 2022
+  geom_segment(aes(x = 3.2, y = 4246.333956, xend = 3.4, yend = 4246.333956), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 3.2, y = 5513.666044, xend = 3.4, yend = 5513.666044), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 3.3, y = 4246.333956, xend = 3.3, yend = 5513.666044), colour = "black", linewidth=1)+
+  geom_point(aes(x = 3.3, y = 4880), colour = "black", show.legend = F, size=3)+
+  
+  #RS - 2020
+  geom_segment(aes(x = 3.6, y = 4584.917699, xend = 3.8, yend = 4584.917699), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 3.6, y = 5338.121179, xend = 3.8, yend = 5338.121179), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 3.7, y = 4584.917699, xend = 3.7, yend = 5338.121179), colour = "black", linewidth=1)+
+  geom_point(aes(x = 3.7, y = 4961.519439), colour = "black", show.legend = F, size=3)+
+  #RS - 2021
+  geom_segment(aes(x = 3.9, y = 4268.782796, xend = 4.1, yend = 4268.782796), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 3.9, y = 5315.052964, xend = 4.1, yend = 5315.052964), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 4, y = 4268.782796, xend = 4, yend = 5315.052964), colour = "black", linewidth=1)+
+  geom_point(aes(x = 4, y = 4791.91788), colour = "black", show.legend = F, size=3)+
+  #RS - 2022
+  geom_segment(aes(x = 4.2, y = 4104.024348, xend = 4.4, yend = 4104.024348), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 4.2, y = 5279.657735, xend = 4.4, yend = 5279.657735), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 4.3, y = 4104.024348, xend = 4.3, yend = 5279.657735), colour = "black", linewidth=1)+
+  geom_point(aes(x = 4.3, y = 4691.841042), colour = "black", show.legend = F, size=3)+
+  
+  #PA - 2020
+  geom_segment(aes(x = 4.6, y = 4387.540005, xend = 4.8, yend = 4387.540005), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 4.6, y = 5211.348884, xend = 4.8, yend = 5211.348884), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 4.7, y = 4387.540005, xend = 4.7, yend = 5211.348884), colour = "black", linewidth=1)+
+  geom_point(aes(x = 4.7, y = 4799.444444), colour = "black", show.legend = F, size=3)+
+  #PA - 2021
+  geom_segment(aes(x = 4.9, y = 4310.368044, xend = 5.1, yend = 4310.368044), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 4.9, y = 5475.409733, xend = 5.1, yend = 5475.409733), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 5, y = 4310.368044, xend = 5, yend = 5475.409733), colour = "black", linewidth=1)+
+  geom_point(aes(x = 5, y = 4892.888889), colour = "black", show.legend = F, size=3)+
+  #PA - 2022
+  geom_segment(aes(x = 5.2, y = 4272.893917, xend = 5.4, yend = 4272.893917), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 5.2, y = 5699.77275, xend = 5.4, yend = 5699.77275), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 5.3, y = 4272.893917, xend = 5.3, yend = 5699.77275), colour = "black", linewidth=1)+
+  geom_point(aes(x = 5.3, y = 4986.333333), colour = "black", show.legend = F, size=3)+
+  
+  #BA - 2020
+  geom_segment(aes(x = 5.6, y = 3705, xend = 5.8, yend = 3705), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 5.6, y = 5124.427837, xend = 5.8, yend = 5124.427837), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 5.7, y = 3705, xend = 5.7, yend = 5124.427837), colour = "black", linewidth=1)+
+  geom_point(aes(x = 5.7, y = 4419.611111), colour = "black", show.legend = F, size=3)+
+  #BA - 2021
+  geom_segment(aes(x = 5.9, y = 3270.460849, xend = 6.1, yend = 3270.460849), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 5.9, y = 5263.983595, xend = 6.1, yend = 5263.983595), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 6, y = 3270.460849, xend = 6, yend = 5263.983595), colour = "black", linewidth=1)+
+  geom_point(aes(x = 6, y = 4267.222222), colour = "black", show.legend = F, size=3)+
+  #BA - 2022
+  geom_segment(aes(x = 6.2, y = 2894.054954, xend = 6.4, yend = 2894.054954), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 6.2, y = 5335.611713, xend = 6.4, yend = 5335.611713), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 6.3, y = 2894.054954, xend = 6.3, yend = 5335.611713), colour = "black", linewidth=1)+
+  geom_point(aes(x = 6.3, y = 4114.833333), colour = "black", show.legend = F, size=3)+
+  
+  #MG - 2020
+  geom_segment(aes(x = 6.6, y = 2143.623472, xend = 6.8, yend = 2143.623472), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 6.6, y = 5779.744949, xend = 6.8, yend = 5779.744949), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 6.7, y = 2143.623472, xend = 6.7, yend = 5779.744949), colour = "black", linewidth=1)+
+  geom_point(aes(x = 6.7, y = 3961.684211), colour = "black", show.legend = F, size=3)+
+  #MG - 2021
+  geom_segment(aes(x = 6.9, y = 2143.623472, xend = 7.1, yend = 2143.623472), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 6.9, y = 5779.744949, xend = 7.1, yend = 5779.744949), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 7, y = 2143.623472, xend = 7, yend = 5779.744949), colour = "black", linewidth=1)+
+  geom_point(aes(x = 7, y = 3961.684211), colour = "black", show.legend = F, size=3)+
+  #MG - 2022
+  geom_segment(aes(x = 7.2, y = 2143.623472, xend = 7.4, yend = 2143.623472), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 7.2, y = 5779.744949, xend = 7.4, yend = 5779.744949), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 7.3, y = 2143.623472, xend = 7.3, yend = 5779.744949), colour = "black", linewidth=1)+
+  geom_point(aes(x = 7.3, y = 3961.684211), colour = "black", show.legend = F, size=3)+
+  
+  #CE - 2020
+  geom_segment(aes(x = 7.6, y = 3289.562908, xend = 7.8, yend = 3289.562908), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 7.6, y = 4018.462087, xend = 7.8, yend = 4018.462087), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 7.7, y = 3289.562908, xend = 7.7, yend = 4018.462087), colour = "black", linewidth=1)+
+  geom_point(aes(x = 7.7, y = 3654.012498), colour = "black", show.legend = F, size=3)+
+  #CE - 2021
+  geom_segment(aes(x = 7.9, y = 3204.349252, xend = 8.1, yend = 3204.349252), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 7.9, y = 4048.722928, xend = 8.1, yend = 4048.722928), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 8, y = 3204.349252, xend = 8, yend = 4048.722928), colour = "black", linewidth=1)+
+  geom_point(aes(x = 8, y = 3626.53609), colour = "black", show.legend = F, size=3)+
+  #CE - 2022
+  geom_segment(aes(x = 8.2, y = 3170.273323, xend = 8.4, yend = 3170.273323), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 8.2, y = 4050.664651, xend = 8.4, yend = 4050.664651), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 8.3, y = 3170.273323, xend = 8.3, yend = 4050.664651), colour = "black", linewidth=1)+
+  geom_point(aes(x = 8.3, y = 3610.468987), colour = "black", show.legend = F, size=3)+
+  
+  #AM - 2020
+  geom_segment(aes(x = 8.6, y = 3021.474503, xend = 8.8, yend = 3021.474503), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 8.6, y = 3527.969941, xend = 8.8, yend = 3527.969941), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 8.7, y = 3021.474503, xend = 8.7, yend = 3527.969941), colour = "black", linewidth=1)+
+  geom_point(aes(x = 8.7, y = 3274.722222), colour = "black", show.legend = F, size=3)+
+  #AM - 2021
+  geom_segment(aes(x = 8.9, y = 2969.298086, xend = 9.1, yend = 2969.298086), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 8.9, y = 3685.590803, xend = 9.1, yend = 3685.590803), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 9, y = 2969.298086, xend = 9, yend = 3685.590803), colour = "black", linewidth=1)+
+  geom_point(aes(x = 9, y = 3327.444444), colour = "black", show.legend = F, size=3)+
+  #AM - 2022
+  geom_segment(aes(x = 9.2, y = 2941.528751, xend = 9.4, yend = 2941.528751), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 9.2, y = 3818.804582, xend = 9.4, yend = 3818.804582), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 9.3, y = 2941.528751, xend = 9.3, yend = 3818.804582), colour = "black", linewidth=1)+
+  geom_point(aes(x = 9.3, y = 3380.166667), colour = "black", show.legend = F, size=3)+
+  
+  #MA - 2020
+  geom_segment(aes(x = 9.6, y = 1992.041336, xend = 9.8, yend = 1992.041336), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 9.6, y = 2511.958664, xend = 9.8, yend = 2511.958664), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 9.7, y = 1992.041336, xend = 9.7, yend = 2511.958664), colour = "black", linewidth=1)+
+  geom_point(aes(x = 9.7, y = 2252), colour = "black", show.legend = F, size=3)+
+  #MA - 2021
+  geom_segment(aes(x = 9.9, y = 1884.362932, xend = 10.1, yend = 1884.362932), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 9.9, y = 2619.637068, xend = 10.1, yend = 2619.637068), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 10, y = 1884.362932, xend = 10, yend = 2619.637068), colour = "black", linewidth=1)+
+  geom_point(aes(x = 10, y = 2252), colour = "black", show.legend = F, size=3)+
+  #MA - 2022
+  geom_segment(aes(x = 10.2, y = 1801.738386, xend = 10.4, yend = 1801.738386), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 10.2, y = 2702.261614, xend = 10.4, yend = 2702.261614), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 10.3, y = 1801.738386, xend = 10.3, yend = 2702.261614), colour = "black", linewidth=1)+
+  geom_point(aes(x = 10.3, y = 2252), colour = "black", show.legend = F, size=3)+
+  
+  #PR - 2020
+  geom_segment(aes(x = 10.6, y = 2015.794258, xend = 10.8, yend = 2015.79425818635), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 10.6, y = 2604.20574181365, xend = 10.8, yend = 2604.20574181365), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 10.7, y = 2015.79425818635, xend = 10.7, yend = 2604.20574181365), colour = "black", linewidth=1)+
+  geom_point(aes(x = 10.7, y = 2310), colour = "black", show.legend = F, size=3)+
+  #PR - 2021
+  geom_segment(aes(x = 10.9, y = 1893.9302497991, xend = 11.1, yend = 1893.9302497991), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 10.9, y = 2726.0697502009, xend = 11.1, yend = 2726.0697502009), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 11, y = 1893.9302497991, xend = 11, yend = 2726.0697502009), colour = "black", linewidth=1)+
+  geom_point(aes(x = 11, y = 2310), colour = "black", show.legend = F, size=3)+
+  #PR - 2022
+  geom_segment(aes(x = 11.2, y = 1800.42070730027, xend = 11.4, yend = 1800.42070730027), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 11.2, y = 2819.57929269973, xend = 11.4, yend = 2819.57929269973), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 11.3, y = 1800.42070730027, xend = 11.3, yend = 2819.57929269973), colour = "black", linewidth=1)+
+  geom_point(aes(x = 11.3, y = 2310), colour = "black", show.legend = F, size=3)+
+  
+  #SC - 2020
+  geom_segment(aes(x = 11.6, y = 1720.81492415815, xend = 11.8, yend = 1720.81492415815), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 11.6, y = 1960.62952028648, xend = 11.8, yend = 1960.62952028648), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 11.7, y = 1720.81492415815, xend = 11.7, yend = 1960.62952028648), colour = "black", linewidth=1)+
+  geom_point(aes(x = 11.7, y = 1840.72222222231), colour = "black", show.legend = F, size=3)+
+  #SC - 2021
+  geom_segment(aes(x = 11.9, y = 1696.86991729477, xend = 12.1, yend = 1696.86991729477), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 11.9, y = 2036.01897159448, xend = 12.1, yend = 2036.01897159448), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 12, y = 1696.86991729477, xend = 12, yend = 2036.01897159448), colour = "black", linewidth=1)+
+  geom_point(aes(x = 12, y = 1866.44444444462), colour = "black", show.legend = F, size=3)+
+  #SC - 2022
+  geom_segment(aes(x = 12.2, y = 1684.4811342215, xend = 12.4, yend = 1684.4811342215), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 12.2, y = 2099.85219911237, xend = 12.4, yend = 2099.85219911237), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 12.3, y = 1684.4811342215, xend = 12.3, yend = 2099.85219911237), colour = "black", linewidth=1)+
+  geom_point(aes(x = 12.3, y = 1892.16666666694), colour = "black", show.legend = F, size=3)+
+  
+  #ES - 2020
+  geom_segment(aes(x = 12.6, y = 1068.7207872754, xend = 12.8, yend = 1068.7207872754), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 12.6, y = 1331.2792127246, xend = 12.8, yend = 1331.2792127246), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 12.7, y = 1068.7207872754, xend = 12.7, yend = 1331.2792127246), colour = "black", linewidth=1)+
+  geom_point(aes(x = 12.7, y = 1200), colour = "black", show.legend = F, size=3)+
+  #ES - 2021
+  geom_segment(aes(x = 12.9, y = 1014.34315690721, xend = 13.1, yend = 1014.34315690721), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 12.9, y = 1385.65684309279, xend = 13.1, yend = 1385.65684309279), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 13, y = 1014.34315690721, xend = 13, yend = 1385.65684309279), colour = "black", linewidth=1)+
+  geom_point(aes(x = 13, y = 1200), colour = "black", show.legend = F, size=3)+
+  #ES - 2022
+  geom_segment(aes(x = 13.2, y = 972.617733583358, xend = 13.4, yend = 972.617733583358), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 13.2, y = 1427.38226641664, xend = 13.4, yend = 1427.38226641664), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 13.3, y = 972.617733583358, xend = 13.3, yend = 1427.38226641664), colour = "black", linewidth=1)+
+  geom_point(aes(x = 13.3, y = 1200), colour = "black", show.legend = F, size=3)+
+  
+  #RN - 2020
+  geom_segment(aes(x = 13.6, y = 824.900477352067, xend = 13.8, yend = 824.900477352067), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 13.6, y = 1145.64231164514, xend = 13.8, yend = 1145.64231164514), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 13.7, y = 824.900477352067, xend = 13.7, yend = 1145.64231164514), colour = "black", linewidth=1)+
+  geom_point(aes(x = 13.7, y = 985.271394498602), colour = "black", show.legend = F, size=3)+
+  #RN - 2021
+  geom_segment(aes(x = 13.9, y = 703.828692726718, xend = 14.1, yend = 703.828692726718), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 13.9, y = 1126.94604937828, xend = 14.1, yend = 1126.94604937828), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 14, y = 703.828692726718, xend = 14, yend = 1126.94604937828), colour = "black", linewidth=1)+
+  geom_point(aes(x = 14, y = 915.387371052498), colour = "black", show.legend = F, size=3)+
+  #RN - 2022
+  geom_segment(aes(x = 14.2, y = 735.68248031822, xend = 14.4, yend = 735.68248031822), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 14.2, y = 1164.02740720726, xend = 14.4, yend = 1164.02740720726), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 14.3, y = 735.68248031822, xend = 14.3, yend = 1164.02740720726), colour = "black", linewidth=1)+
+  geom_point(aes(x = 14.3, y = 949.85494376274), colour = "black", show.legend = F, size=3)+
+  
+  #MS - 2020
+  geom_segment(aes(x = 14.6, y = 962.097874427129, xend = 14.8, yend = 962.097874427129), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 14.6, y = 1311.90212557287, xend = 14.8, yend = 1311.90212557287), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 14.7, y = 962.097874427129, xend = 14.7, yend = 1311.90212557287), colour = "black", linewidth=1)+
+  geom_point(aes(x = 14.7, y = 1137), colour = "black", show.legend = F, size=3)+
+  #MS - 2021
+  geom_segment(aes(x = 14.9, y = 889.651041926963, xend = 15.1, yend = 889.651041926963), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 14.9, y = 1384.34895807304, xend = 15.1, yend = 1384.34895807304), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 15, y = 889.651041926963, xend = 15, yend = 1384.34895807304), colour = "black", linewidth=1)+
+  geom_point(aes(x = 15, y = 1137), colour = "black", show.legend = F, size=3)+
+  #MS - 2022
+  geom_segment(aes(x = 15.2, y = 834.060632155995, xend = 15.4, yend = 834.060632155995), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 15.2, y = 1439.93936784401, xend = 15.4, yend = 1439.93936784401), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 15.3, y = 834.060632155995, xend = 15.3, yend = 1439.93936784401), colour = "black", linewidth=1)+
+  geom_point(aes(x = 15.3, y = 1137), colour = "black", show.legend = F, size=3)+
+  
+  #PB - 2020
+  geom_segment(aes(x = 15.6, y = 945.525102981947, xend = 15.8, yend = 945.525102981947), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 15.6, y = 1216.20140338088, xend = 15.8, yend = 1216.20140338088), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 15.7, y = 945.525102981947, xend = 15.7, yend = 1216.20140338088), colour = "black", linewidth=1)+
+  geom_point(aes(x = 15.7, y = 1080.86325318142), colour = "black", show.legend = F, size=3)+
+  #PB - 2021
+  geom_segment(aes(x = 15.9, y = 932.261328925536, xend = 16.1, yend = 932.261328925536), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 15.9, y = 1260.31337265922, xend = 16.1, yend = 1260.31337265922), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 16, y = 932.261328925536, xend = 16, yend = 1260.31337265922), colour = "black", linewidth=1)+
+  geom_point(aes(x = 16, y = 1096.28735079238), colour = "black", show.legend = F, size=3)+
+  #PB - 2022
+  geom_segment(aes(x = 16.2, y = 932.261328925536, xend = 16.4, yend = 932.261328925536), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 16.2, y = 1260.31337265922, xend = 16.4, yend = 1260.31337265922), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 16.3, y = 932.261328925536, xend = 16.3, yend = 1260.31337265922), colour = "black", linewidth=1)+
+  geom_point(aes(x = 16.3, y = 1096.28735079238), colour = "black", show.legend = F, size=3)+
+  
+  #MT - 2020
+  geom_segment(aes(x = 16.6, y = 975.981082478698, xend = 16.8, yend = 975.981082478698), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 16.6, y = 1497.2627478312, xend = 16.8, yend = 1497.2627478312), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 16.7, y = 975.981082478698, xend = 16.7, yend = 1497.2627478312), colour = "black", linewidth=1)+
+  geom_point(aes(x = 16.7, y = 1236.62191515495), colour = "black", show.legend = F, size=3)+
+  #MT - 2021
+  geom_segment(aes(x = 16.9, y = 914.064326529298, xend = 17.1, yend = 914.064326529298), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 16.9, y = 1518.75759483021, xend = 17.1, yend = 1518.75759483021), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 17, y = 914.064326529298, xend = 17, yend = 1518.75759483021), colour = "black", linewidth=1)+
+  geom_point(aes(x = 17, y = 1216.41096067975), colour = "black", show.legend = F, size=3)+
+  #MT - 2022
+  geom_segment(aes(x = 17.2, y = 889.047034180666, xend = 17.4, yend = 889.047034180666), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 17.2, y = 1520.01075472994, xend = 17.4, yend = 1520.01075472994), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 17.3, y = 889.047034180666, xend = 17.3, yend = 1520.01075472994), colour = "black", linewidth=1)+
+  geom_point(aes(x = 17.3, y = 1204.52889445531), colour = "black", show.legend = F, size=3)+
+  
+  #GO - 2020
+  geom_segment(aes(x = 17.6, y = 890.610728801911, xend = 17.8, yend = 890.610728801911), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 17.6, y = 1083.45958089927, xend = 17.8, yend = 1083.45958089927), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 17.7, y = 890.610728801911, xend = 17.7, yend = 1083.45958089927), colour = "black", linewidth=1)+
+  geom_point(aes(x = 17.7, y = 987.035154850589), colour = "black", show.legend = F, size=3)+
+  #GO - 2021
+  geom_segment(aes(x = 17.9, y = 857.9078297404, xend = 18.1, yend = 857.9078297404), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 17.9, y = 1093.69941315909, xend = 18.1, yend = 1093.69941315909), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 18, y = 857.9078297404, xend = 18, yend = 1093.69941315909), colour = "black", linewidth=1)+
+  geom_point(aes(x = 18, y = 975.803621449746), colour = "black", show.legend = F, size=3)+
+  #GO - 2022
+  geom_segment(aes(x = 18.2, y = 840.713268659806, xend = 18.4, yend = 840.713268659806), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 18.2, y = 1095.09083410852, xend = 18.4, yend = 1095.09083410852), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 18.3, y = 840.713268659806, xend = 18.3, yend = 1095.09083410852), colour = "black", linewidth=1)+
+  geom_point(aes(x = 18.3, y = 967.902051384164), colour = "black", show.legend = F, size=3)+
+  
+  #AL - 2020
+  geom_segment(aes(x = 18.6, y = 922.7023697196, xend = 18.8, yend = 922.7023697196), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 18.6, y = 1174.05715519324, xend = 18.8, yend = 1174.05715519324), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 18.7, y = 922.7023697196, xend = 18.7, yend = 1174.05715519324), colour = "black", linewidth=1)+
+  geom_point(aes(x = 18.7, y = 1048.37976245642), colour = "black", show.legend = F, size=3)+
+  #AL - 2021
+  geom_segment(aes(x = 18.9, y = 888.387428842111, xend = 19.1, yend = 888.387428842111), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 18.9, y = 1173.87217900163, xend = 19.1, yend = 1173.87217900163), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 19, y = 888.387428842111, xend = 19, yend = 1173.87217900163), colour = "black", linewidth=1)+
+  geom_point(aes(x = 19, y = 1031.12980392187), colour = "black", show.legend = F, size=3)+
+  #AL - 2022
+  geom_segment(aes(x = 19.2, y = 867.932011224237, xend = 19.4, yend = 867.932011224237), colour = "black", linewidth=1, linewidth=1)+
+  geom_segment(aes(x = 19.2, y = 1210.24856828382, xend = 19.4, yend = 1210.24856828382), colour = "black", linewidth=1, linewidth=1)+
+  geom_segment(aes(x = 19.3, y = 867.932011224237, xend = 19.3, yend = 1210.24856828382), colour = "black", linewidth=1, linewidth=1)+
+  geom_point(aes(x = 19.3, y = 1039.09028975403), colour = "black", show.legend = F, size=3)+
+  
+  #SE - 2020
+  geom_segment(aes(x = 19.6, y = 687.278032730619, xend = 19.8, yend = 687.278032730619), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 19.6, y = 990.721967269381, xend = 19.8, yend = 990.721967269381), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 19.7, y = 687.278032730619, xend = 19.7, yend = 990.721967269381), colour = "black", linewidth=1)+
+  geom_point(aes(x = 19.7, y = 839), colour = "black", show.legend = F, size=3)+
+  #SE - 2021
+  geom_segment(aes(x = 19.9, y = 624.432736177714, xend = 20.1, yend = 624.432736177714), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 19.9, y = 1053.56726382229, xend = 20.1, yend = 1053.56726382229), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 20, y = 624.432736177714, xend = 20, yend = 1053.56726382229), colour = "black", linewidth=1)+
+  geom_point(aes(x = 20, y = 839), colour = "black", show.legend = F, size=3)+
+  #SE - 2022
+  geom_segment(aes(x = 20.2, y = 576.209844065129, xend = 20.4, yend = 576.209844065129), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 20.2, y = 1101.79015593487, xend = 20.4, yend = 1101.79015593487), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 20.3, y = 576.209844065129, xend = 20.3, yend = 1101.79015593487), colour = "black", linewidth=1)+
+  geom_point(aes(x = 20.3, y = 839), colour = "black", show.legend = F, size=3)+
+  
+  #PI - 2020
+  geom_segment(aes(x = 20.6, y = 532.117974466735, xend = 20.8, yend = 532.117974466735), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 20.6, y = 773.65980331143, xend = 20.8, yend = 773.65980331143), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 20.7, y = 532.117974466735, xend = 20.7, yend = 773.65980331143), colour = "black", linewidth=1)+
+  geom_point(aes(x = 20.7, y = 652.888888889082), colour = "black", show.legend = F, size=3)+
+  #PI - 2021
+  geom_segment(aes(x = 20.9, y = 454.981912661881, xend = 21.1, yend = 454.981912661881), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 20.9, y = 796.573642894449, xend = 21.1, yend = 796.573642894449), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21, y = 454.981912661881, xend = 21, yend = 796.573642894449), colour = "black", linewidth=1, linewidth=1)+
+  geom_point(aes(x = 21, y = 625.777777778165), colour = "black", show.legend = F, size=3)+
+  #PI - 2022
+  geom_segment(aes(x = 21.2, y = 389.485306811189, xend = 21.4, yend = 389.485306811189), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.2, y = 807.848026523305, xend = 21.4, yend = 807.848026523305), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.3, y = 389.485306811189, xend = 21.3, yend = 807.848026523305), colour = "black", linewidth=1)+
+  geom_point(aes(x = 21.3, y = 598.666666667247), colour = "black", show.legend = F, size=3)+
+  
+  #AC - 2020
+  geom_segment(aes(x = 21.6, y = 421.183844972542, xend = 21.8, yend = 421.183844972542), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.6, y = 610.816155027458, xend = 21.8, yend = 610.816155027458), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.7, y = 421.183844972542, xend = 21.7, yend = 610.816155027458), colour = "black", linewidth=1)+
+  geom_point(aes(x = 21.7, y = 516), colour = "black", show.legend = F, size=3)+
+  #AC - 2021
+  geom_segment(aes(x = 21.9, y = 381.9097076281, xend = 22.1, yend = 381.9097076281), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.9, y = 650.0902923719, xend = 22.1, yend = 650.0902923719), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 22, y = 381.9097076281, xend = 22, yend = 650.0902923719), colour = "black", linewidth=1)+
+  geom_point(aes(x = 22, y = 516), colour = "black", show.legend = F, size=3)+
+  #AC - 2020
+  geom_segment(aes(x = 22.2, y = 351.773602114116, xend = 22.4, yend = 351.773602114116), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 22.2, y = 680.226397885884, xend = 22.4, yend = 680.226397885884), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 22.3, y = 351.773602114116, xend = 22.3, yend = 680.226397885884), colour = "black", linewidth=1)+
+  geom_point(aes(x = 22.3, y = 516), colour = "black", show.legend = F, size=3)+
+  
+  #RO - 2020
+  geom_segment(aes(x = 22.6, y = 492.793866804104, xend = 22.8, yend = 492.793866804104), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 22.6, y = 673.921420254265, xend = 22.8, yend = 673.921420254265), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 22.7, y = 492.793866804104, xend = 22.7, yend = 673.921420254265), colour = "black", linewidth=1)+
+  geom_point(aes(x = 22.7, y = 583.357643529185), colour = "black", show.legend = F, size=3)+
+  #RO - 2021
+  geom_segment(aes(x = 22.9, y = 486.282626960288, xend = 23.1, yend = 486.282626960288), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 22.9, y = 680.432660098081, xend = 23.1, yend = 680.432660098081), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 23, y = 486.282626960288, xend = 23, yend = 680.432660098081), colour = "black", linewidth=1)+
+  geom_point(aes(x = 23, y = 583.357643529185), colour = "black", show.legend = F, size=3)+
+  #RO - 2020
+  geom_segment(aes(x = 23.2, y = 480.181483351589, xend = 23.4, yend = 480.181483351589), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 23.2, y = 686.533803706781, xend = 23.4, yend = 686.533803706781), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 23.3, y = 480.181483351589, xend = 23.3, yend = 686.533803706781), colour = "black", linewidth=1)+
+  geom_point(aes(x = 23.3, y = 583.357643529185), colour = "black", show.legend = F, size=3)+
+  
+  #RR - 2020
+  geom_segment(aes(x = 23.6, y = 225.616067420623, xend = 23.8, yend = 225.616067420623), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 23.6, y = 354.026358488907, xend = 23.8, yend = 354.026358488907), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 23.7, y = 225.616067420623, xend = 23.7, yend = 354.026358488907), colour = "black", linewidth=1)+
+  geom_point(aes(x = 23.7, y = 289.821212954765), colour = "black", show.legend = F, size=3)+
+  #RR - 2021
+  geom_segment(aes(x = 23.9, y = 191.681520106699, xend = 24.1, yend = 191.681520106699), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 23.9, y = 362.937702062503, xend = 24.1, yend = 362.937702062503), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 24, y = 191.681520106699, xend = 24, yend = 362.937702062503), colour = "black", linewidth=1)+
+  geom_point(aes(x = 24, y = 277.309611084601), colour = "black", show.legend = F, size=3)+
+  #RR - 2020
+  geom_segment(aes(x = 24.2, y = 167.114909860407, xend = 24.4, yend = 167.114909860407), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 24.2, y = 365.423413447971, xend = 24.4, yend = 365.423413447971), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 24.3, y = 167.114909860407, xend = 24.3, yend = 365.423413447971), colour = "black", linewidth=1)+
+  geom_point(aes(x = 24.3, y = 266.269161654189), colour = "black", show.legend = F, size=3)+
+  
+  #AP - 2020
+  geom_segment(aes(x = 24.6, y = 161.869085024083, xend = 24.8, yend = 161.869085024083), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 24.6, y = 278.130914975917, xend = 24.8, yend = 278.130914975917), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 24.7, y = 161.869085024083, xend = 24.7, yend = 278.130914975917), colour = "black", linewidth=1)+
+  geom_point(aes(x = 24.7, y = 161.869085024083), colour = "black", show.legend = F, size=3)+
+  #AP - 2021
+  geom_segment(aes(x = 24.9, y = 161.869085024083, xend = 25.1, yend = 161.869085024083), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 24.9, y = 278.130914975917, xend = 25.1, yend = 278.130914975917), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 25, y = 161.869085024083, xend = 25, yend = 278.130914975917), colour = "black", linewidth=1)+
+  geom_point(aes(x = 25, y = 220), colour = "black", show.legend = F, size=3)+
+  #AP - 2020
+  geom_segment(aes(x = 25.2, y = 161.869085024083, xend = 25.4, yend = 161.869085024083), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 25.2, y = 278.130914975917, xend = 25.4, yend = 278.130914975917), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 25.3, y = 161.869085024083, xend = 25.3, yend = 278.13091497591), colour = "black", linewidth=1)+
+  geom_point(aes(x = 25.3, y = 220), colour = "black", show.legend = F, size=3)+
+  
+  #DF - 2020
+  geom_segment(aes(x = 25.6, y = 286.984393072258, xend = 25.8, yend = 286.984393072258), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 25.6, y = 406.489291138268, xend = 25.8, yend = 406.489291138268), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 25.7, y = 286.984393072258, xend = 25.7, yend = 406.489291138268), colour = "black", linewidth=1)+
+  geom_point(aes(x = 25.7, y = 346.736842105263), colour = "black", show.legend = F, size=3)+
+  #DF - 2021
+  geom_segment(aes(x = 25.9, y = 286.984393072258, xend = 26.1, yend = 286.984393072258), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 25.9, y = 406.489291138268, xend = 26.1, yend = 406.489291138268), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 26, y = 286.984393072258, xend = 26, yend = 406.489291138268), colour = "black", linewidth=1)+
+  geom_point(aes(x = 26, y = 346.736842105263), colour = "black", show.legend = F, size=3)+
+  #DF - 2020
+  geom_segment(aes(x = 26.2, y = 286.984393072258, xend = 26.4, yend = 286.984393072258), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 26.2, y = 406.489291138268, xend = 26.4, yend = 406.489291138268), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 26.3, y = 286.984393072258, xend = 26.3, yend = 406.489291138268), colour = "black", linewidth=1)+
+  geom_point(aes(x = 26.3, y = 346.736842105263), colour = "black", show.legend = F, size=3)+
+  
+  #TO - 2020
+  geom_segment(aes(x = 26.6, y = 253.488675663126, xend = 26.8, yend = 253.488675663126), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 26.6, y = 237, xend = 26.8, yend = 237), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 26.7, y = 253.488675663126, xend = 26.7, yend = 237), colour = "black", linewidth=1)+
+  geom_point(aes(x = 26.7, y = 168.511324336874), colour = "black", show.legend = F, size=3)+
+  #TO - 2021
+  geom_segment(aes(x = 26.9, y = 150.911938629935, xend = 27.1, yend = 150.911938629935), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 26.9, y = 271.088061370065, xend = 27.1, yend = 271.088061370065), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 27, y = 150.911938629935, xend = 27, yend = 271.088061370065), colour = "black", linewidth=1)+
+  geom_point(aes(x = 27, y = 211), colour = "black", show.legend = F, size=3)+
+  #TO - 2020
+  geom_segment(aes(x = 27.2, y = 137.40745500515, xend = 27.4, yend = 137.40745500515), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 27.2, y = 284.59254499485, xend = 27.4, yend = 284.59254499485), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 27.3, y = 137.40745500515, xend = 27.3, yend = 284.59254499485), colour = "black", linewidth=1)+
+  geom_point(aes(x = 27.3, y = 211), colour = "black", show.legend = F, size=3)+
+  
+  #Legenda
+  geom_segment(aes(x = 21.6, y = 15000, xend = 21.8, yend = 15000), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.6, y = 18000, xend = 21.8, yend = 18000), colour = "black", linewidth=1)+
+  geom_segment(aes(x = 21.7, y = 15000, xend = 21.7, yend = 18000), colour = "black", linewidth=1)+
+  geom_point(aes(x = 21.7, y = 16500), colour = "black", show.legend = F, size=3)+
+  
+  annotate("text", x = 23.2, y = 15000, label = "Limite inferior", size = 8)+
+  annotate("text", x = 23.2, y = 18000, label = "Limite superior", size = 8)+
+  annotate("text", x = 23.2, y = 16500, label = "Previsto", size = 8)+
+  annotate("text", x = 23.2, y = 19200, label = "Modelo ARIMA\nIntervalo de confiança 95%", size = 8)+
+  
+  scale_fill_manual(name = "Casos notificados", values=c("2020" = "#BFACE2", "2021" = "#E97777", "2022" = "#E97800"), breaks = c("2020", "2021", "2022"))+
+  labs(x = "UF", y = "n") + 
+  theme_ipsum(grid = F, ticks = F, base_size = 30, axis_text_size = 30) +
+  theme(axis.line.x = element_line(colour = "grey"),
+        axis.text.x = element_text(colour = "black", size = 30),
+        axis.text.y = element_text(colour = "black", size = 30),
+        axis.title.x = element_text(colour = "black", size = 30, face = "bold"),
+        axis.title.y.left = element_text(colour = "black", size = 30, face = "bold", angle = 0),
+        axis.title.y.right = element_text(colour = "black", size = 30, face = "bold"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.text = element_text(size = 30),
+        legend.position="bottom")
+
+ggsave(gg_dados_arima_tab, width = 800, height = 400, units = "mm", file = "Figura_arima.png", dpi = "retina")
+
+#FIM
